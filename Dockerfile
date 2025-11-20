@@ -1,5 +1,5 @@
 ARG TWITCHDOWNLOADER_VERSION="1.56.2"
-ARG YT_DLP_VERSION="2025.10.22"
+ARG YT_DLP_VERSION="2025.11.12"
 
 #
 # API Build
@@ -32,10 +32,8 @@ RUN pip install requests --break-system-packages
 RUN git clone --depth 1 --branch ${YT_DLP_VERSION} https://github.com/yt-dlp/yt-dlp.git /app/yt-dlp
 # Copy patch for Twitch Ganymede 
 #COPY ganymede_twitch_yt_dlp_git.patch /tmp/ganymede_twitch_yt_dlp_git.patch
-COPY yt_dlp_twitch_fix_11_10_25.patch /tmp/yt_dlp_twitch_fix_11_10_25.patch
 WORKDIR /app/yt-dlp
 #RUN git apply /tmp/ganymede_twitch_yt_dlp_git.patch
-RUN git apply /tmp/yt_dlp_twitch_fix_11_10_25.patch
 # Build
 RUN make
 
@@ -64,7 +62,12 @@ RUN if [ "$(uname -m)" = "aarch64" ]; then \
     unzip twitchdownloader.zip && \
     rm twitchdownloader.zip
 
+# Clone chat-downloader
 RUN git clone --depth 1 https://github.com/xenova/chat-downloader.git
+# Apply Twitch fixes
+COPY chat_downloader_twitch_fix.patch /tmp/chat_downloader_twitch_fix.patch
+WORKDIR /tmp/chat-downloader
+RUN git apply /tmp/chat_downloader_twitch_fix.patch
 
 # Install yt-dlp
 COPY --from=build-yt-dlp /app/yt-dlp/yt-dlp /usr/local/bin/yt-dlp
