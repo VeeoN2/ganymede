@@ -151,7 +151,7 @@ func (w GenerateSpriteThumbnailWorker) Work(ctx context.Context, job *river.Job[
 		}
 		rootVideoPath = fmt.Sprintf("%s/%s/%s", env.VideosDir, channelFolderName, video.FolderName)
 	}
-	spritesDirectory := fmt.Sprintf("%s/sprites", rootVideoPath)
+	spritesDirectory := fmt.Sprintf("%s/sprites-%s", rootVideoPath, videoUUID)
 
 	err = os.MkdirAll(spritesDirectory, os.ModePerm)
 	if err != nil {
