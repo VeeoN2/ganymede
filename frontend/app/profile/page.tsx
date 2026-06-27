@@ -20,15 +20,25 @@ const ProfilePage = () => {
   const {
     chatPlaybackSmoothScroll,
     setChatPlaybackSmoothScroll,
+    chatOnLeft,
+    setChatOnLeft,
     showChatHistogram,
     setShowChatHistogram,
     showProcessingVideosInRecentlyArchived,
-    setShowProcessingVideosInRecentlyArchived
+    setShowProcessingVideosInRecentlyArchived,
+    showChatTimestamps,
+    setShowChatTimestamps,
+    autoplayVideo,
+    setAutoplayVideo
   } = useSettingsStore();
 
   const toggleSmoothScroll = () => {
     setChatPlaybackSmoothScroll(!chatPlaybackSmoothScroll);
   };
+
+  const toggleChatOnLeft = () => {
+    setChatOnLeft(!chatOnLeft);
+  }
 
   const toggleChatHistogram = () => {
     setShowChatHistogram(!showChatHistogram);
@@ -36,6 +46,14 @@ const ProfilePage = () => {
 
   const toggleProcessingVideosInRecentlyArchived = () => {
     setShowProcessingVideosInRecentlyArchived(!showProcessingVideosInRecentlyArchived);
+  }
+
+  const toggleChatTimestamps = () => {
+    setShowChatTimestamps(!showChatTimestamps);
+  }
+
+  const toggleAutoplayVideo = () => {
+    setAutoplayVideo(!autoplayVideo);
   }
 
   useEffect(() => {
@@ -70,6 +88,13 @@ const ProfilePage = () => {
                 my={5}
               />
               <Checkbox
+                label={t('settings.chatOnLeft')}
+                description={t('settings.chatOnLeftDescription')}
+                checked={chatOnLeft}
+                onChange={toggleChatOnLeft}
+                my={5}
+              />
+              <Checkbox
                 label={t('settings.chatHistogram')}
                 description={t('settings.chatHistogramDescription')}
                 checked={showChatHistogram}
@@ -77,10 +102,24 @@ const ProfilePage = () => {
                 my={5}
               />
               <Checkbox
+                label={t('settings.chatTimestamps')}
+                description={t('settings.chatTimestampsDescription')}
+                checked={showChatTimestamps}
+                onChange={toggleChatTimestamps}
+                my={5}
+              />
+              <Checkbox
                 label={t('settings.showProcessingVideos')}
                 description={t('settings.showProcessingVideosDescription')}
                 checked={showProcessingVideosInRecentlyArchived}
                 onChange={toggleProcessingVideosInRecentlyArchived}
+                my={5}
+              />
+              <Checkbox
+                label={t('settings.autoplayVideo')}
+                description={t('settings.autoplayVideoDescription')}
+                checked={autoplayVideo}
+                onChange={toggleAutoplayVideo}
                 my={5}
               />
             </Box>

@@ -13,12 +13,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/grafov/m3u8"
 	"github.com/rs/zerolog/log"
 	"github.com/zibbp/ganymede/ent"
 	"github.com/zibbp/ganymede/internal/config"
 	"github.com/zibbp/ganymede/internal/errors"
 	"github.com/zibbp/ganymede/internal/exec/ytdlp"
+	"github.com/zibbp/ganymede/internal/hls"
 	"github.com/zibbp/ganymede/internal/platform"
 	"github.com/zibbp/ganymede/internal/utils"
 )
@@ -26,6 +26,20 @@ import (
 const (
 	sigintTimeout = 300 * time.Second
 )
+
+func appendFFmpegLiveOutputStreamArgs(args []string, audioOnly bool) []string {
+	streamMap := "0"
+	if audioOnly {
+		streamMap = "0:a"
+	}
+
+	return append(args,
+		"-map", streamMap,
+		"-dn",
+		"-ignore_unknown",
+		"-c", "copy",
+	)
+}
 
 // DownloadTwitchVideo downloads a Twitch video.
 func DownloadTwitchVideo(ctx context.Context, video ent.Vod) error {
@@ -179,7 +193,7 @@ func DownloadTwitchLiveVideo(ctx context.Context, video ent.Vod, channel ent.Cha
 	log.Debug().Str("video_id", video.ID.String()).Msgf("logging ffmpeg output to %s", logFilePath)
 
 	proxyFound := false // Whether a proxy was found
-	var masterPlaylist *m3u8.MasterPlaylist
+	var masterPlaylist *hls.Multivariant
 
 	twitchURL := utils.CreateTwitchURL(video.ExtID, video.Type, channel.Name)
 
@@ -241,17 +255,18 @@ func DownloadTwitchLiveVideo(ctx context.Context, video ent.Vod, channel ent.Cha
 		closestQuality = "audio_only"
 	}
 
+	audioOnly := closestQuality == "audio_only"
+
 	// Base ffmpeg args (shared between transport-stream and hls live archiving)
 	ffmpegArgs := []string{
 		"-y",
 		"-hide_banner",
 		"-fflags", "+genpts+discardcorrupt",
+		"-rw_timeout", "30000000", // 30 second timeout for ffmpeg to connect/read before it gives up and retries
+		"-timeout", "30000000", // 30 second timeout for ffmpeg to connect/read before it gives up and retries
 		"-i", qualitiesURI[closestQuality],
-		"-map", "0",
-		"-dn",
-		"-ignore_unknown",
-		"-c", "copy",
 	}
+	ffmpegArgs = appendFFmpegLiveOutputStreamArgs(ffmpegArgs, audioOnly)
 
 	// Decide archive format.
 	archivingAsMP4 := (video.VideoHlsPath == "")
@@ -279,13 +294,14 @@ func DownloadTwitchLiveVideo(ctx context.Context, video ent.Vod, channel ent.Cha
 			segmentPattern := fmt.Sprintf("%s/%s_segment%%06d.ts", video.TmpVideoHlsPath, video.ExtID)
 
 			ffmpegArgs = append(ffmpegArgs,
+				appendFFmpegLiveOutputStreamArgs(nil, audioOnly)...,
+			)
+			ffmpegArgs = append(ffmpegArgs,
 				"-start_number", "0",
 				"-hls_time", "2",
 				"-hls_list_size", "0",
 				"-hls_playlist_type", "event",
 				"-hls_flags", "append_list+independent_segments",
-				"-c:v", "copy",
-				"-c:a", "copy",
 				"-hls_segment_filename", segmentPattern,
 				"-f", "hls",
 				playlistPath,
@@ -300,6 +316,9 @@ func DownloadTwitchLiveVideo(ctx context.Context, video ent.Vod, channel ent.Cha
 		playlistPath := fmt.Sprintf("%s/%s-video.m3u8", video.TmpVideoHlsPath, video.ExtID)
 		segmentPattern := fmt.Sprintf("%s/%s_segment%%06d.ts", video.TmpVideoHlsPath, video.ExtID)
 
+		ffmpegArgs = append(ffmpegArgs,
+			appendFFmpegLiveOutputStreamArgs(nil, audioOnly)...,
+		)
 		ffmpegArgs = append(ffmpegArgs,
 			"-start_number", "0",
 			"-hls_time", "10",
@@ -500,7 +519,15 @@ func DownloadTwitchChat(ctx context.Context, video ent.Vod) error {
 	log.Debug().Str("video_id", video.ID.String()).Msgf("logging chatdownload output to %s", logFilePath)
 
 	var cmdArgs []string
-	cmdArgs = append(cmdArgs, "chatdownload", "--id", video.ExtID, "--embed-images", "--collision", "overwrite", "-o", video.TmpChatDownloadPath)
+	cmdArgs = append(cmdArgs, "chatdownload", "--id", video.ExtID, "--embed-images", "--collision", "overwrite")
+
+	// Forward shared chat flags from the chat render config so the user's
+	// --bttv/--ffz/--stv/--temp-path preferences also apply to chatdownload,
+	// which fetches emotes for embedding when --embed-images is set.
+	configRenderArgs := config.Get().Parameters.ChatRender
+	cmdArgs = append(cmdArgs, extractSharedChatArgs(strings.Fields(configRenderArgs))...)
+
+	cmdArgs = append(cmdArgs, "-o", video.TmpChatDownloadPath)
 
 	log.Debug().Str("video_id", video.ID.String()).Str("cmd", strings.Join(cmdArgs, " ")).Msgf("running TwitchDownloaderCLI")
 
@@ -614,6 +641,34 @@ func RenderTwitchChat(ctx context.Context, video ent.Vod) error {
 	return nil
 }
 
+// extractSharedChatArgs returns the subset of args from a chatrender arg list
+// that are also valid for chatupdate and chatdownload.
+func extractSharedChatArgs(args []string) []string {
+	// --collision is omitted: every caller hardcodes it.
+	sharedFlagNames := []string{"--bttv", "--ffz", "--stv", "--temp-path"}
+	var result []string
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		for _, flag := range sharedFlagNames {
+			if arg == flag {
+				result = append(result, arg)
+				// Only consume the next token as a value if it isn't itself a flag,
+				// otherwise `--stv --temp-path /p` would swallow `--temp-path`.
+				if i+1 < len(args) && !strings.HasPrefix(args[i+1], "--") {
+					result = append(result, args[i+1])
+					i++
+				}
+				break
+			}
+			if strings.HasPrefix(arg, flag+"=") {
+				result = append(result, arg)
+				break
+			}
+		}
+	}
+	return result
+}
+
 // checkLogForNoElements returns true if the log file contains the expected message.
 //
 // Used to check if the chat render failure was caused by no messages in the chat.
@@ -658,7 +713,16 @@ func UpdateTwitchChat(ctx context.Context, video ent.Vod) error {
 	log.Debug().Str("video_id", video.ID.String()).Msgf("logging TwitchDownloader output to %s", logFilePath)
 
 	var cmdArgs []string
-	cmdArgs = append(cmdArgs, "chatupdate", "-i", video.TmpLiveChatConvertPath, "--embed-missing", "--collision", "overwrite", "-o", video.TmpChatDownloadPath)
+	cmdArgs = append(cmdArgs, "chatupdate", "-i", video.TmpLiveChatConvertPath, "--embed-missing", "--collision", "overwrite")
+
+	// Forward shared chat flags from the chat render config so the user's
+	// --bttv/--ffz/--stv/--temp-path preferences also apply to chatupdate,
+	// which fetches emotes for embedding and can otherwise hang on a
+	// third-party timeout.
+	configRenderArgs := config.Get().Parameters.ChatRender
+	cmdArgs = append(cmdArgs, extractSharedChatArgs(strings.Fields(configRenderArgs))...)
+
+	cmdArgs = append(cmdArgs, "-o", video.TmpChatDownloadPath)
 
 	log.Debug().Str("video_id", video.ID.String()).Str("cmd", strings.Join(cmdArgs, " ")).Msgf("running TwitchDownloaderCLI")
 

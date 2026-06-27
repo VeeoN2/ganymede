@@ -8,6 +8,34 @@ import (
 )
 
 var (
+	// APIKeysColumns holds the columns for the "api_keys" table.
+	APIKeysColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "name", Type: field.TypeString, Unique: true},
+		{Name: "description", Type: field.TypeString, Nullable: true},
+		{Name: "prefix", Type: field.TypeString, Unique: true},
+		{Name: "hashed_secret", Type: field.TypeString},
+		{Name: "scopes", Type: field.TypeJSON},
+		{Name: "last_used_at", Type: field.TypeTime, Nullable: true},
+		{Name: "revoked_at", Type: field.TypeTime, Nullable: true},
+		{Name: "updated_at", Type: field.TypeTime},
+		{Name: "created_at", Type: field.TypeTime},
+		{Name: "created_by_id", Type: field.TypeUUID, Nullable: true},
+	}
+	// APIKeysTable holds the schema information for the "api_keys" table.
+	APIKeysTable = &schema.Table{
+		Name:       "api_keys",
+		Columns:    APIKeysColumns,
+		PrimaryKey: []*schema.Column{APIKeysColumns[0]},
+		ForeignKeys: []*schema.ForeignKey{
+			{
+				Symbol:     "api_keys_users_created_by",
+				Columns:    []*schema.Column{APIKeysColumns[10]},
+				RefColumns: []*schema.Column{UsersColumns[0]},
+				OnDelete:   schema.SetNull,
+			},
+		},
+	}
 	// BlockedVideosColumns holds the columns for the "blocked_videos" table.
 	BlockedVideosColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeString},
@@ -73,6 +101,7 @@ var (
 		{Name: "is_live", Type: field.TypeBool, Default: false},
 		{Name: "archive_chat", Type: field.TypeBool, Default: true},
 		{Name: "resolution", Type: field.TypeString, Nullable: true, Default: "best"},
+		{Name: "vod_resolution", Type: field.TypeString, Nullable: true, Default: "best"},
 		{Name: "last_live", Type: field.TypeTime},
 		{Name: "render_chat", Type: field.TypeBool, Default: true},
 		{Name: "video_age", Type: field.TypeInt64, Default: 0},
@@ -97,7 +126,7 @@ var (
 		ForeignKeys: []*schema.ForeignKey{
 			{
 				Symbol:     "lives_channels_live",
-				Columns:    []*schema.Column{LivesColumns[24]},
+				Columns:    []*schema.Column{LivesColumns[25]},
 				RefColumns: []*schema.Column{ChannelsColumns[0]},
 				OnDelete:   schema.NoAction,
 			},
@@ -382,7 +411,7 @@ var (
 		{Name: "username", Type: field.TypeString, Unique: true},
 		{Name: "password", Type: field.TypeString, Nullable: true},
 		{Name: "oauth", Type: field.TypeBool, Default: false},
-		{Name: "role", Type: field.TypeEnum, Enums: []string{"admin", "editor", "archiver", "user"}, Default: "user"},
+		{Name: "role", Type: field.TypeEnum, Enums: []string{"admin", "editor", "archiver", "user", "system"}, Default: "user"},
 		{Name: "webhook", Type: field.TypeString, Nullable: true},
 		{Name: "updated_at", Type: field.TypeTime},
 		{Name: "created_at", Type: field.TypeTime},
@@ -482,6 +511,7 @@ var (
 	}
 	// Tables holds all the tables in the schema.
 	Tables = []*schema.Table{
+		APIKeysTable,
 		BlockedVideosTable,
 		ChannelsTable,
 		ChaptersTable,
@@ -505,6 +535,7 @@ var (
 )
 
 func init() {
+	APIKeysTable.ForeignKeys[0].RefTable = UsersTable
 	ChaptersTable.ForeignKeys[0].RefTable = VodsTable
 	LivesTable.ForeignKeys[0].RefTable = ChannelsTable
 	LiveCategoriesTable.ForeignKeys[0].RefTable = LivesTable

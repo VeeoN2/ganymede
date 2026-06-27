@@ -27,6 +27,7 @@ type AddWatchedChannelRequest struct {
 	DownloadUploads        bool                `json:"download_uploads" validate:"boolean"`
 	ChannelID              string              `json:"channel_id" validate:"required"`
 	Resolution             string              `json:"resolution" validate:"required,oneof=best 1440p 1080p 720p 480p 360p 160p audio"`
+	VodResolution          string              `json:"vod_resolution" validate:"omitempty,oneof=best 1440p 1080p 720p 480p 360p 160p audio"`
 	ArchiveChat            bool                `json:"archive_chat" validate:"boolean"`
 	RenderChat             bool                `json:"render_chat" validate:"boolean"`
 	DownloadSubOnly        bool                `json:"download_sub_only" validate:"boolean"`
@@ -56,6 +57,7 @@ type UpdateWatchedChannelRequest struct {
 	DownloadHighlights     bool                `json:"download_highlights" validate:"boolean"`
 	DownloadUploads        bool                `json:"download_uploads" validate:"boolean"`
 	Resolution             string              `json:"resolution" validate:"required,oneof=best 1440p 1080p 720p 480p 360p 160p audio"`
+	VodResolution          string              `json:"vod_resolution" validate:"omitempty,oneof=best 1440p 1080p 720p 480p 360p 160p audio"`
 	ArchiveChat            bool                `json:"archive_chat" validate:"boolean"`
 	RenderChat             bool                `json:"render_chat" validate:"boolean"`
 	DownloadSubOnly        bool                `json:"download_sub_only" validate:"boolean"`
@@ -103,6 +105,7 @@ type ArchiveLiveChannelRequest struct {
 //	@Failure		500	{object}	utils.ErrorResponse
 //	@Router			/live [get]
 //	@Security		ApiKeyCookieAuth
+//	@Security		ApiKeyAuth
 func (h *Handler) GetLiveWatchedChannels(c echo.Context) error {
 	channels, err := h.Service.LiveService.GetLiveWatchedChannels(c)
 	if err != nil {
@@ -125,6 +128,7 @@ func (h *Handler) GetLiveWatchedChannels(c echo.Context) error {
 //	@Failure		500		{object}	utils.ErrorResponse
 //	@Router			/live [post]
 //	@Security		ApiKeyCookieAuth
+//	@Security		ApiKeyAuth
 func (h *Handler) AddLiveWatchedChannel(c echo.Context) error {
 	ccr := new(AddWatchedChannelRequest)
 	if err := c.Bind(ccr); err != nil {
@@ -157,6 +161,7 @@ func (h *Handler) AddLiveWatchedChannel(c echo.Context) error {
 		IsLive:                 false,
 		ArchiveChat:            ccr.ArchiveChat,
 		Resolution:             ccr.Resolution,
+		VodResolution:          ccr.VodResolution,
 		RenderChat:             ccr.RenderChat,
 		DownloadSubOnly:        ccr.DownloadSubOnly,
 		Categories:             ccr.Categories,
@@ -204,6 +209,7 @@ func (h *Handler) AddLiveWatchedChannel(c echo.Context) error {
 //	@Failure		500		{object}	utils.ErrorResponse
 //	@Router			/live/{id} [put]
 //	@Security		ApiKeyCookieAuth
+//	@Security		ApiKeyAuth
 func (h *Handler) UpdateLiveWatchedChannel(c echo.Context) error {
 	id := c.Param("id")
 	lID, err := uuid.Parse(id)
@@ -236,6 +242,7 @@ func (h *Handler) UpdateLiveWatchedChannel(c echo.Context) error {
 		DownloadUploads:        ccr.DownloadUploads,
 		ArchiveChat:            ccr.ArchiveChat,
 		Resolution:             ccr.Resolution,
+		VodResolution:          ccr.VodResolution,
 		RenderChat:             ccr.RenderChat,
 		DownloadSubOnly:        ccr.DownloadSubOnly,
 		Categories:             ccr.Categories,
@@ -282,6 +289,7 @@ func (h *Handler) UpdateLiveWatchedChannel(c echo.Context) error {
 //	@Failure		500	{object}	utils.ErrorResponse
 //	@Router			/live/{id} [delete]
 //	@Security		ApiKeyCookieAuth
+//	@Security		ApiKeyAuth
 func (h *Handler) DeleteLiveWatchedChannel(c echo.Context) error {
 	id := c.Param("id")
 	lID, err := uuid.Parse(id)

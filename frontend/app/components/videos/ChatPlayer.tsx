@@ -1,4 +1,4 @@
-import { Video } from "@/app/hooks/useVideos";
+import { Video, VideoType } from "@/app/hooks/useVideos";
 import classes from "./ChatPlayer.module.css";
 import {
   Emote,
@@ -6,18 +6,20 @@ import {
   useGetEmotesForVideo,
   useGetBadgesForVideo,
   Comment,
+  GanymedeChatMessageKind,
   GanymedeFormattedMessageFragment,
   GanymedeFormattedMessageType,
   getChatForVideo,
   getSeekChatForVideo
 } from "@/app/hooks/useChat";
-import { useEffect, useRef, useState, useCallback, useMemo } from "react";
+import { RefObject, useEffect, useRef, useState, useCallback, useMemo } from "react";
 import { Box, Center, Loader, Text } from "@mantine/core";
 import ChatMessage from "./ChatMessage";
 import { uuidv4 } from "@/app/util/util";
 import VideoEventBus from "@/app/util/VideoEventBus";
 import useSettingsStore from "@/app/store/useSettingsStore";
 import { useTranslations } from "next-intl";
+import { MediaPlayerInstance } from "@vidstack/react";
 
 // Constants moved to top level
 const CHAT_OFFSET_SIZE = 10;
@@ -27,6 +29,18 @@ const TIME_SKIP_THRESHOLD = 2;
 const IGNORED_BADGES = new Set(['no_audio', 'no_video', 'predictions']);
 const SUBSCRIPTION_BADGES = new Set(['subscriber', 'sub-gifter', 'sub_gifter', 'bits']);
 const SCROLL_THRESHOLD = 100; // px from bottom to trigger auto-scroll
+const EVENT_LABELS: Record<string, string> = {
+  sub: "chatEventSub",
+  resub: "chatEventResub",
+  subgift: "chatEventGiftSub",
+  anonsubgift: "chatEventGiftSub",
+  submysterygift: "chatEventGiftBomb",
+  raid: "chatEventRaid",
+  unraid: "chatEventRaid",
+  ritual: "chatEventRitual",
+  announcement: "chatEventAnnouncement",
+};
+const FIRST_MESSAGE_LABEL = "chatEventFirstMessage";
 
 interface ChatMaps {
   emoteMap: Map<string, Emote>;
@@ -39,6 +53,7 @@ interface ChatMaps {
 
 interface Params {
   video: Video;
+  playerRef: RefObject<MediaPlayerInstance | null>;
 }
 
 interface ChatError {
@@ -46,7 +61,13 @@ interface ChatError {
   timestamp: number;
 }
 
-const ChatPlayer = ({ video }: Params) => {
+interface PendingChatRange {
+  start: number;
+  end: number;
+  generation: number;
+}
+
+const ChatPlayer = ({ video, playerRef }: Params) => {
   const t = useTranslations('VideoComponents')
   const [isReady, setIsReady] = useState(false);
   const [messages, setMessages] = useState<Comment[]>([]);
@@ -57,9 +78,14 @@ const ChatPlayer = ({ video }: Params) => {
   const internalMessagesRef = useRef<Comment[]>([]);
   const lastTimeRef = useRef(0);
   const lastCheckTimeRef = useRef(0);
-  const lastEndTimeRef = useRef(0);
-  const isLoadingRef = useRef(false);
+  const pendingRangeRef = useRef<PendingChatRange | null>(null);
+  const pendingSeekRef = useRef<Promise<boolean> | null>(null);
+  const isSeekLoadingRef = useRef(false);
+  const requestGenerationRef = useRef(0);
   const retryCountRef = useRef(0);
+  const queuedIdsRef = useRef<Set<string>>(new Set());
+  const processedIdsRef = useRef<Set<string>>(new Set());
+  const processedIdsOrderRef = useRef<string[]>([]);
   const chatMapsRef = useRef<ChatMaps>({
     emoteMap: new Map(),
     thirdPartyEmoteMap: new Map(),
@@ -70,7 +96,13 @@ const ChatPlayer = ({ video }: Params) => {
   });
   const chatContainerRef = useRef<HTMLDivElement>(null);
 
-  const { chatPlaybackSmoothScroll } = useSettingsStore()
+  const { chatPlaybackSmoothScroll, showChatTimestamps } = useSettingsStore()
+  const clipVodOffset = useMemo<number | null>(() => {
+    const offset = video.clip_vod_offset;
+    return video.type === VideoType.Clip && typeof offset === "number" && Number.isFinite(offset)
+      ? offset
+      : null;
+  }, [video.clip_vod_offset, video.type]);
 
   // Custom hooks with error handling
   const { data: chatEmotes, error: emotesError } = useGetEmotesForVideo(video.id);
@@ -159,6 +191,32 @@ const ChatPlayer = ({ video }: Params) => {
     setMessagesWithScroll(prev => [...prev, comment]);
   }, [createSystemMessage, setMessagesWithScroll]);
 
+  const seekToComment = useCallback((seconds: number) => {
+    if (!playerRef.current) return;
+    if (!Number.isFinite(seconds)) return;
+
+    const playerTime = clipVodOffset !== null
+      ? seconds - clipVodOffset
+      : seconds;
+
+    if (!Number.isFinite(playerTime)) return;
+
+    playerRef.current.currentTime = Math.max(0, playerTime);
+  }, [clipVodOffset, playerRef]);
+
+  const getCommentTimestampSeconds = useCallback((comment: Comment): number | null => {
+    if (!Number.isFinite(comment.content_offset_seconds)) return null;
+
+    if (clipVodOffset !== null) {
+      const timestampSeconds = comment.content_offset_seconds - clipVodOffset;
+      if (!Number.isFinite(timestampSeconds)) return null;
+
+      return Math.max(0, timestampSeconds);
+    }
+
+    return comment.content_offset_seconds;
+  }, [clipVodOffset]);
+
   // Optimized badge processing
   const addBadgesToFormattedComment = useCallback((comment: Comment) => {
     if (!comment.message.user_badges) {
@@ -230,64 +288,149 @@ const ChatPlayer = ({ video }: Params) => {
     }
   }, [handleError]);
 
-  // Optimized chat fetching with rate limiting and error handling
-  const getChat = useCallback(async (start: number, end: number) => {
-    if (isLoadingRef.current) return;
+  const classifyComment = useCallback((comment: Comment) => {
+    const msgID = comment.message.user_notice_params?.msg_id;
+    const noticeID = typeof msgID === "string" ? msgID : "";
+    const noticeParams = comment.message.user_notice_params?.params ?? {};
+    const isFirstMessage = comment.message.is_first_message
+      || comment.message.user_badges?.some(badge => badge._id === "first-msg")
+      || (
+        noticeID === "ritual"
+        && noticeParams["msg-param-ritual-name"] === "new_chatter"
+      );
+
+    if (noticeID && noticeID !== "highlighted-message") {
+      comment.ganymede_chat_message_kind = GanymedeChatMessageKind.UserNotice;
+      comment.ganymede_event_label = isFirstMessage
+        ? FIRST_MESSAGE_LABEL
+        : EVENT_LABELS[noticeID] ?? "chatEventGeneric";
+      return comment;
+    }
+
+    if (noticeID === "highlighted-message") {
+      comment.ganymede_chat_message_kind = GanymedeChatMessageKind.Highlighted;
+      return comment;
+    }
+
+    if (isFirstMessage) {
+      comment.ganymede_chat_message_kind = GanymedeChatMessageKind.FirstMessage;
+      comment.ganymede_event_label = FIRST_MESSAGE_LABEL;
+      return comment;
+    }
+
+    if (comment.message.is_action) {
+      comment.ganymede_chat_message_kind = GanymedeChatMessageKind.Action;
+      return comment;
+    }
+
+    if ((comment.message.bits_spent ?? 0) > 0) {
+      comment.ganymede_chat_message_kind = GanymedeChatMessageKind.Bits;
+      return comment;
+    }
+
+    comment.ganymede_chat_message_kind = GanymedeChatMessageKind.Normal;
+    return comment;
+  }, []);
+
+  const enqueueComments = useCallback((comments?: Comment[]) => {
+    if (!comments?.length) return;
+
+    const nextMessages = [...internalMessagesRef.current];
+    let addedMessage = false;
+
+    comments.forEach((comment) => {
+      if (!comment._id) return;
+      if (queuedIdsRef.current.has(comment._id) || processedIdsRef.current.has(comment._id)) return;
+
+      queuedIdsRef.current.add(comment._id);
+      nextMessages.push(comment);
+      addedMessage = true;
+    });
+
+    if (!addedMessage) return;
+
+    nextMessages.sort((a, b) => a.content_offset_seconds - b.content_offset_seconds);
+    internalMessagesRef.current = nextMessages;
+  }, []);
+
+  // Optimized chat fetching with stale response protection.
+  const getChat = useCallback(async (start: number, end: number, generation = requestGenerationRef.current) => {
+    if (pendingRangeRef.current) return false;
+
+    pendingRangeRef.current = { start, end, generation };
 
     try {
-      isLoadingRef.current = true;
       const data = await getChatForVideo(video.id, start, end);
-      if (data?.length) {
-        internalMessagesRef.current.push(...data);
-      }
+      if (generation !== requestGenerationRef.current) return false;
+
+      enqueueComments(data);
+      lastCheckTimeRef.current = Math.max(lastCheckTimeRef.current, end);
+      return true;
     } catch (error) {
       handleError(error as Error, "Chat fetching");
+      return false;
     } finally {
-      isLoadingRef.current = false;
+      const pendingRange = pendingRangeRef.current;
+      if (
+        pendingRange?.generation === generation &&
+        pendingRange.start === start &&
+        pendingRange.end === end
+      ) {
+        pendingRangeRef.current = null;
+      }
     }
-  }, [video.id, handleError]);
+  }, [enqueueComments, video.id, handleError]);
 
-  const getSeekChat = useCallback(async (start: number, count: number) => {
-    if (isLoadingRef.current) return;
+  const getSeekChat = useCallback(async (start: number, count: number, generation = requestGenerationRef.current) => {
+    if (isSeekLoadingRef.current) return false;
+
+    isSeekLoadingRef.current = true;
 
     try {
-      isLoadingRef.current = true;
       const data = await getSeekChatForVideo(video.id, start, count);
-      if (data?.length) {
-        internalMessagesRef.current.push(...data);
-      }
+      if (generation !== requestGenerationRef.current) return false;
+
+      enqueueComments(data);
+      return true;
     } catch (error) {
       handleError(error as Error, "Seek chat fetching");
+      return false;
     } finally {
-      isLoadingRef.current = false;
-    }
-  }, [video.id, handleError]);
-
-  const clearChat = useCallback(() => {
-    setMessagesWithScroll([]);
-    internalMessagesRef.current = [];
-    addCustomComment(t('chatTimeSkipDetected'));
-  }, [addCustomComment, setMessagesWithScroll]);
-
-  // Tracking processed IDs
-  const processedIds = new Set<string>();
-  const processedIdsOrder: Array<string> = [];
-
-  // Function to add an ID to the processed set
-  const addProcessedId = (id: string) => {
-    if (processedIds.has(id)) return;
-
-    processedIds.add(id);
-    processedIdsOrder.push(id);
-
-    // Remove oldest IDs if size exceeds MAX_CHAT_MESSAGES * 2
-    while (processedIdsOrder.length > MAX_CHAT_MESSAGES * 2) {
-      const oldestId = processedIdsOrder.shift();
-      if (oldestId) {
-        processedIds.delete(oldestId);
+      if (generation === requestGenerationRef.current) {
+        isSeekLoadingRef.current = false;
       }
     }
-  };
+  }, [enqueueComments, video.id, handleError]);
+
+  const clearChat = useCallback(() => {
+    requestGenerationRef.current += 1;
+    pendingRangeRef.current = null;
+    pendingSeekRef.current = null;
+    isSeekLoadingRef.current = false;
+    internalMessagesRef.current = [];
+    queuedIdsRef.current.clear();
+    processedIdsRef.current.clear();
+    processedIdsOrderRef.current = [];
+    setMessagesWithScroll([]);
+    addCustomComment(t('chatTimeSkipDetected'));
+    return requestGenerationRef.current;
+  }, [addCustomComment, setMessagesWithScroll, t]);
+
+  // Function to add an ID to the processed set
+  const addProcessedId = useCallback((id: string) => {
+    if (processedIdsRef.current.has(id)) return;
+
+    processedIdsRef.current.add(id);
+    processedIdsOrderRef.current.push(id);
+
+    // Remove oldest IDs if size exceeds MAX_CHAT_MESSAGES * 2
+    while (processedIdsOrderRef.current.length > MAX_CHAT_MESSAGES * 2) {
+      const oldestId = processedIdsOrderRef.current.shift();
+      if (oldestId) {
+        processedIdsRef.current.delete(oldestId);
+      }
+    }
+  }, []);
 
   // chatTick handles processing of chat messages
   const chatTick = useCallback(async (time: number) => {
@@ -304,13 +447,15 @@ const ChatPlayer = ({ video }: Params) => {
 
         // Remove the message from the queue
         internalMessagesRef.current.shift();
+        queuedIdsRef.current.delete(comment._id);
 
         // Skip duplicates
-        if (processedIds.has(comment._id)) continue;
+        if (processedIdsRef.current.has(comment._id)) continue;
 
         // Process the message (e.g. add badges and emotes)
         const processedComment = addBadgesToFormattedComment(comment);
         processedComment.ganymede_formatted_message = addEmotesToFormattedComment(processedComment);
+        classifyComment(processedComment);
 
         // Add to batch and mark as processed
         newMessagesToAdd.push(processedComment);
@@ -328,7 +473,7 @@ const ChatPlayer = ({ video }: Params) => {
     } catch (error) {
       handleError(error as Error, "Chat processing");
     }
-  }, [addBadgesToFormattedComment, addEmotesToFormattedComment, handleError, setMessagesWithScroll]);
+  }, [addBadgesToFormattedComment, addEmotesToFormattedComment, addProcessedId, classifyComment, handleError, setMessagesWithScroll]);
 
   // Initialize chat data
   useEffect(() => {
@@ -393,24 +538,29 @@ const ChatPlayer = ({ video }: Params) => {
 
       if (Math.abs(time - lastTimeRef.current) > TIME_SKIP_THRESHOLD) {
         console.log(`Player time skip detected - ${lastTimeRef.current} -> ${time}`);
-        clearChat();
-        lastEndTimeRef.current = 0;
+        const generation = clearChat();
         lastCheckTimeRef.current = time;
-        // clear processed IDs to prevent duplicates
-        processedIds.clear();
-        processedIdsOrder.length = 0;
-        getSeekChat(time, 50);
+        const seekPromise = getSeekChat(time, 50, generation);
+        pendingSeekRef.current = seekPromise;
+        seekPromise.finally(() => {
+          if (pendingSeekRef.current === seekPromise) {
+            pendingSeekRef.current = null;
+          }
+          if (generation !== requestGenerationRef.current) return;
+          if (pendingRangeRef.current) return;
+
+          getChat(time, time + CHAT_OFFSET_SIZE, generation);
+        });
       }
 
       lastTimeRef.current = time;
 
       if (time <= lastCheckTimeRef.current) return;
+      if (pendingSeekRef.current) return;
+      if (pendingRangeRef.current) return;
 
       const startTime = lastCheckTimeRef.current || time;
       const endTime = startTime + CHAT_OFFSET_SIZE;
-
-      lastCheckTimeRef.current = endTime;
-      lastEndTimeRef.current = endTime;
 
       getChat(startTime, endTime);
     }, TICK_INTERVAL);
@@ -476,7 +626,16 @@ const ChatPlayer = ({ video }: Params) => {
         </Box>
       )}
       {messages.map((comment) => (
-        <ChatMessage key={comment._id} comment={comment} />
+        <ChatMessage
+          key={comment._id}
+          comment={comment}
+          showTimestamp={showChatTimestamps}
+          timestampSeconds={showChatTimestamps ? getCommentTimestampSeconds(comment) : null}
+          onTimestampClick={() => {
+            if (!Number.isFinite(comment.content_offset_seconds)) return;
+            seekToComment(comment.content_offset_seconds);
+          }}
+        />
       ))}
     </div>
   );
